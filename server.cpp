@@ -1,125 +1,83 @@
-#include <chrono>
-#include <cstdlib>
-#include <cstring>
-#include <ctime>
-#include <fstream>
-#include <iostream>
-#include <netinet/in.h>
-#include <string>
+#include <cerrno>
+#include <print>
+#include <system_error>
+
 #include <sys/socket.h>
-#include <thread>
 #include <unistd.h>
-#include <unordered_map>
-#include <vector>
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
 
 using std::print, std::println;
 
-using CommunicationType = int;
-
-enum class AddressFamily : int {
+enum class Domain : int {
     IPv4 = AF_INET,
-    IPv6 = AF_INET6
+    // IPv6 = AF_INET6,
 };
-
 enum class SocketType : int {
-    TCP = SOCK_STREAM,
-    UDP = SOCK_DGRAM
+    Stream = SOCK_STREAM,
+    Datagram = SOCK_DGRAM,
 };
-
-enum class SocketProtocol : int {
+enum class Protocol : int {
     Default = 0,
-    TCP = IPPROTO_TCP,
-    UDP = IPPROTO_UDP
 };
 
-enum class SockOptLevel : int {
-    Socket = SOL_SOCKET,
-    IP = IPPROTO_IP,
-    TCP = IPPROTO_TCP,
-};
+constexpr int INVALID_FD = -1;
+constexpr int SYSCALL_ERR = -1;
 
-enum class SockOptName : int {
-    ReuseAddr = SO_REUSEADDR,
-    ReusePort = SO_REUSEPORT,
-    KeepAlive = SO_KEEPALIVE,
-};
+using FileDescriptor = int;
+using Port = uint16_t;
 
-constexpr int default_backlog = 32;
-constexpr int port = 12345;
-
-int load_port_from_dotenv(const char *filename = ".env") {
-    std::ifstream file(filename);
-    if (!file) {
-        std::cerr << "Could not open " << filename << "; falling back to 12345\n";
-        return 12345;
+class MySocket {
+public:
+    MySocket(int domain, int socket_type, int protocol)
+        : MySocket(
+              static_cast<Domain>(domain),
+              static_cast<SocketType>(socket_type),
+              static_cast<Protocol>(protocol)) {}
+    MySocket(Domain domain_, SocketType socket_type_, Protocol protocol_)
+        : domain(domain_),
+          socket_type(socket_type_),
+          protocol(protocol_),
+          fd(::socket(
+              static_cast<int>(domain),
+              static_cast<int>(socket_type),
+              static_cast<int>(protocol))) {
+        if (fd == INVALID_FD) {
+            throw std::system_error(errno, std::system_category(), "socket()");
+        }
+        println("Socket created with FD = {}", fd);
     }
 
-    std::string line;
-    while (std::getline(file, line)) {
-        auto eq = line.find('=');
-        if (eq == std::string::npos) continue;
-
-        std::string key = line.substr(0, eq);
-        std::string value = line.substr(eq + 1);
-
-        // basic trim
-        key.erase(0, key.find_first_not_of(" \t\"")); // ltrim
-        key.erase(key.find_last_not_of(" \t\"") + 1); // rtrim
-        value.erase(0, value.find_first_not_of(" \t\""));
-        value.erase(value.find_last_not_of(" \t\"") + 1);
-
-        if (key == "port") return std::stoi(value);
+    ~MySocket() {
+        if (fd != INVALID_FD) {
+            println("Closing socket with FD = {}", fd);
+            if (::close(fd) == SYSCALL_ERR) {
+                println(
+                    "Destructor error: close() failed: {}",
+                    std::system_error(errno, std::system_category(), "close()").what());
+            }
+        }
     }
-    std::cerr << "No 'port' key in " << filename << "; using 12345 as a fallback.\n";
-    return 12345;
-}
 
-void handle_client(int client_fd) {
-    println("handle_client({})", client_fd);
-    std::this_thread::sleep_for(std::chrono::seconds(2));
+    void bind(const std::string &ip_address, Port port) {
+        // TODO
+    }
 
-    int num = 1 + std::rand() % 10;
-    std::string response = std::to_string(num);
-    println("sending response {}", response);
+    FileDescriptor get_fd() const { return fd; }
 
-    send(client_fd, response.c_str(), response.size(), 0);
-    close(client_fd);
-}
+private:
+    FileDescriptor fd;
+    Domain domain;
+    SocketType socket_type;
+    Protocol protocol;
+};
 
 int main() {
-    std::srand(static_cast<unsigned>(std::time(nullptr)));
-    int port = load_port_from_dotenv();
-
-    int server_fd = socket(
-        static_cast<int>(AddressFamily::IPv4),
-        static_cast<int>(SocketType::TCP),
-        static_cast<int>(SocketProtocol::TCP));
-
-    int yes = 1;
-    setsockopt(
-        server_fd,
-        static_cast<int>(SockOptLevel::Socket),
-        static_cast<int>(SockOptName::ReuseAddr),
-        &yes,
-        sizeof(yes));
-
-    sockaddr_in addr{};
-    addr.sin_family = static_cast<int>(AddressFamily::IPv4);
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(port);
-
-    bind(server_fd, (struct sockaddr *)&addr, sizeof(addr));
-
-    listen(server_fd, 32);
-
-    println("Server listening on port {}", port);
-
-    while (true) {
-        int client_fd = accept(server_fd, nullptr, nullptr);
-        if (client_fd < 0) {
-            std::perror("accept");
-            continue;
-        }
-        std::thread(handle_client, client_fd).detach();
+    try {
+        MySocket s(Domain::IPv4, SocketType::Stream, Protocol::Default);
+    } catch (const std::system_error &e) {
+        println("Error: {} ({})", e.what(), e.code().message());
+        return EXIT_FAILURE;
     }
 }
