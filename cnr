@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+clang++ -std=c++23 -o server.o server.cpp && ./server.o

@@ -38,6 +38,7 @@
         "vector": "cpp",
         "cstddef": "cpp",
         "algorithm": "cpp",
-        "fstream": "cpp"
+        "fstream": "cpp",
+        "system_error": "cpp"
     }
 }
