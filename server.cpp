@@ -1,7 +1,14 @@
 #include <cerrno>
+#include <chrono>
+#include <mutex>
+#include <optional>
 #include <print>
+#include <ranges>
+#include <shared_mutex>
+#include <stack>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <utility>
 
 #include <sys/socket.h>
@@ -11,6 +18,9 @@
 #include <netinet/in.h>
 
 using std::print, std::println;
+using std::views::iota;
+
+using namespace std::chrono_literals;
 
 enum class Domain : int {
     IPv4 = AF_INET,
@@ -31,7 +41,6 @@ inline std::string to_string(Domain d) {
     }
     return "UnknownDomain";
 }
-
 inline std::string to_string(SocketType t) {
     switch (t) {
     case SocketType::Stream:
@@ -41,7 +50,6 @@ inline std::string to_string(SocketType t) {
     }
     return "UnknownSocketType";
 }
-
 inline std::string to_string(Protocol p) {
     switch (p) {
     case Protocol::Default:
@@ -71,13 +79,15 @@ struct std::formatter<Protocol> : std::formatter<std::string> {
     }
 };
 
+namespace mynet {
 constexpr int INVALID_FD = -1;
 constexpr int SYSCALL_ERR = -1;
 
 using FileDescriptor = int;
 using Port = uint16_t;
 
-namespace mynet {
+Port port = 12345;
+
 class Socket {
 public:
     Socket(int domain, int socket_type, int protocol)
@@ -197,7 +207,7 @@ public:
     }
 
     void send_all(const std::string &msg) const {
-        println("Sending message '{}'", msg);
+        println("Sending message: {}", msg);
         const char *p = msg.data();
         std::size_t left = msg.size();
         while (left > 0) {
@@ -227,28 +237,90 @@ private:
         println("Creating socket from accept() with FD='{}'", fd);
     }
 };
+
+template <typename T>
+class LockedStack {
+public:
+    LockedStack() = default;
+
+    void push(T fd) {
+        std::unique_lock _{mutex};
+        fds.push(std::move(fd));
+    }
+
+    [[nodiscard]]
+    std::optional<T> pop() {
+        std::unique_lock _{mutex};
+        if (fds.empty()) return std::nullopt;
+        auto elem = std::optional<T>{std::move(fds.top())};
+        fds.pop();
+        return elem;
+    }
+
+    [[nodiscard]]
+    size_t size() const {
+        std::shared_lock _{mutex};
+        return fds.size();
+    }
+
+    [[nodiscard]]
+    bool empty() const {
+        std::shared_lock _{mutex};
+        return fds.size() == 0;
+    }
+
+private:
+    std::stack<T> fds;
+    mutable std::shared_mutex mutex;
+};
 } // namespace mynet
 
+void _worker_task_handle_client(mynet::Socket &client, int i) {
+    while (true) {
+        println("[{}] Got fd {} to process.", i, client.get_fd());
+        auto data = client.receive();
+        if (data.empty() || data == "\r\n") break;
+        client.send_all(data);
+    }
+}
+
+void worker_task(mynet::LockedStack<mynet::Socket> &client_stack, int i) {
+    while (true) {
+        auto client_ = client_stack.pop();
+        if (client_ != std::nullopt) {
+            mynet::Socket client = std::move(*client_);
+            _worker_task_handle_client(client, i);
+            println("[{}] Finished processeing the client.", i);
+        }
+        std::this_thread::sleep_for(200ms);
+    }
+}
+
 int main() {
+    mynet::LockedStack<mynet::Socket> client_stack;
+    constexpr size_t n_workers = 32;
+    std::array<std::thread, n_workers> workers;
+    for (int i : iota(0zu, n_workers)) {
+        workers[i] = std::thread{
+            [&client_stack, i] {
+                worker_task(client_stack, static_cast<int>(i));
+            }};
+    }
+
     println("Initiating server");
     try {
         mynet::Socket server(Domain::IPv4, SocketType::Stream, Protocol::Default);
-        server.bind("127.0.0.1", 8080);
+        server.bind("127.0.0.1", mynet::port);
         server.listen();
 
-        mynet::Socket client = server.accept();
-        println("Client (FD = {}) connected!", client.get_fd());
         while (true) {
-            auto data = client.receive();
-            if (data.empty()) {
-                println("Client closed connection");
-                break;
-            }
-            client.send_all("I've received your message!");
+            client_stack.push(server.accept());
         }
     } catch (const std::system_error &e) {
         println("Error: {} ({})", e.what(), e.code().message());
-        return EXIT_FAILURE;
     }
-    return 0;
+
+    for (auto &worker : workers) {
+        worker.join();
+    }
 }

@@ -39,6 +39,8 @@
         "cstddef": "cpp",
         "algorithm": "cpp",
         "fstream": "cpp",
-        "system_error": "cpp"
+        "system_error": "cpp",
+        "stack": "cpp",
+        "__config": "cpp"
     }
 }
